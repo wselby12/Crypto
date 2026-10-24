@@ -132,9 +132,33 @@ class Ledger:
             );
             CREATE TABLE IF NOT EXISTS settlements (
                 decision_id TEXT PRIMARY KEY REFERENCES decisions(id),
-                settlement_json TEXT NOT NULL
+                settlement_json TEXT NOT NULL,
+                settlement_sha256 TEXT
+            );
+            CREATE TABLE IF NOT EXISTS runs (
+                id TEXT PRIMARY KEY,
+                created_at TEXT NOT NULL,
+                input_json TEXT NOT NULL,
+                report_json TEXT NOT NULL,
+                input_sha256 TEXT NOT NULL,
+                report_sha256 TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS run_decisions (
+                run_id TEXT NOT NULL REFERENCES runs(id),
+                decision_id TEXT NOT NULL UNIQUE REFERENCES decisions(id),
+                candidate_index INTEGER NOT NULL,
+                position INTEGER NOT NULL,
+                PRIMARY KEY (run_id, candidate_index),
+                UNIQUE (run_id, position)
             );
         """)
+        settlement_columns = {
+            row["name"] for row in self._connection.execute("PRAGMA table_info(settlements)")
+        }
+        if "settlement_sha256" not in settlement_columns:
+            # Old settlement contents cannot be retroactively authenticated.
+            # Leave their digests NULL and disclose that gap on every read.
+            self._connection.execute("ALTER TABLE settlements ADD COLUMN settlement_sha256 TEXT")
         self._connection.commit()
 
     def close(self) -> None:
@@ -146,8 +170,9 @@ class Ledger:
     def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> None:
         self.close()
 
-    def record(self, payload: dict, report: dict) -> str:
-        """Save the original evidence and report, including rejected decisions."""
+    @staticmethod
+    def _prepare_decision(payload: dict, report: dict, created_at: str) -> tuple:
+        """Validate and freeze one decision before any database writes occur."""
         if not isinstance(payload, dict) or not isinstance(report, dict):
             raise ValueError("payload and report must be JSON objects")
         try:
@@ -167,14 +192,100 @@ class Ledger:
             raise ValueError("Missing or invalid game, player, market, as_of, or report decision") from exc
         input_json, report_json = _canonical(payload), _canonical(report)
         decision_id = str(uuid4())
+        return (decision_id, created_at, as_of.isoformat(), kickoff.isoformat(),
+                game_id, player_id, stat, sportsbook, line, odds, decision,
+                int(_synthetic(payload, report)), input_json, report_json,
+                _digest(input_json), _digest(report_json))
+
+    def record(self, payload: dict, report: dict) -> str:
+        """Save the original evidence and report, including rejected decisions."""
+        values = self._prepare_decision(payload, report, datetime.now(timezone.utc).isoformat())
         with self._connection:
             self._connection.execute(
                 "INSERT INTO decisions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (decision_id, datetime.now(timezone.utc).isoformat(), as_of.isoformat(), kickoff.isoformat(),
-                 game_id, player_id, stat, sportsbook, line, odds, decision, int(_synthetic(payload, report)),
-                 input_json, report_json, _digest(input_json), _digest(report_json)),
+                values,
             )
-        return decision_id
+        return values[0]
+
+    def record_run(self, manifest: dict, result: dict) -> dict:
+        """Atomically retain a complete Sunday run and every candidate decision.
+
+        All rejected decisions are retained. A malformed candidate or failed
+        insert leaves neither a partial run nor partial decision records.
+        Neither this method nor standalone recording places a wager.
+        """
+        if not isinstance(manifest, dict) or not isinstance(result, dict):
+            raise ValueError("manifest and result must be JSON objects")
+        if not isinstance(manifest.get("schedule"), dict):
+            raise ValueError("manifest.schedule must be a JSON object")
+        candidates, entries = manifest.get("candidates"), result.get("decisions")
+        if not isinstance(candidates, list) or not isinstance(entries, list):
+            raise ValueError("manifest.candidates and result.decisions must be arrays")
+        if len(entries) != len(candidates):
+            raise ValueError("A run must preserve exactly one decision for every candidate")
+        # Freeze the complete evidence first, including fields outside each
+        # candidate. Finite per-candidate data must not hide a nonfinite source.
+        input_json, report_json = _canonical(manifest), _canonical(result)
+        created_at = datetime.now(timezone.utc).isoformat()
+        prepared = []
+        links = []
+        indices = set()
+        run_id = str(uuid4())
+        for position, entry in enumerate(entries):
+            if not isinstance(entry, dict):
+                raise ValueError("Every run decision must be a JSON object")
+            index = entry.get("candidate_index")
+            if type(index) is not int or not 0 <= index < len(candidates) or index in indices:
+                raise ValueError("Run candidate indices must be unique integers covering every candidate")
+            indices.add(index)
+            values = self._prepare_decision(candidates[index], entry.get("report"), created_at)
+            prepared.append(values)
+            links.append((run_id, values[0], index, position))
+        input_hash, report_hash = _digest(input_json), _digest(report_json)
+        with self._connection:
+            self._connection.execute(
+                "INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?)",
+                (run_id, created_at, input_json, report_json, input_hash, report_hash),
+            )
+            self._connection.executemany(
+                "INSERT INTO decisions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                prepared,
+            )
+            self._connection.executemany(
+                "INSERT INTO run_decisions VALUES (?, ?, ?, ?)", links,
+            )
+        return {"run_id": run_id, "decision_ids": [values[0] for values in prepared],
+                "input_sha256": input_hash, "report_sha256": report_hash}
+
+    def get_run(self, run_id: str) -> dict:
+        """Verify the run snapshot, every child hash, and their original links."""
+        row = self._connection.execute("SELECT * FROM runs WHERE id = ?", (run_id,)).fetchone()
+        if row is None:
+            raise ValueError(f"Unknown run: {run_id}")
+        if _digest(row["input_json"]) != row["input_sha256"] or _digest(row["report_json"]) != row["report_sha256"]:
+            raise ValueError(f"Run snapshot integrity check failed: {run_id}")
+        manifest, result = json.loads(row["input_json"]), json.loads(row["report_json"])
+        links = self._connection.execute(
+            "SELECT * FROM run_decisions WHERE run_id = ? ORDER BY position", (run_id,)
+        ).fetchall()
+        if len(links) != len(result["decisions"]) or len(links) != len(manifest["candidates"]):
+            raise ValueError(f"Run decision link integrity check failed: {run_id}")
+        decisions = []
+        for position, link in enumerate(links):
+            entry = result["decisions"][position]
+            index = entry["candidate_index"]
+            if link["position"] != position or link["candidate_index"] != index:
+                raise ValueError(f"Run decision link integrity check failed: {run_id}")
+            child = self.get(link["decision_id"])
+            if (_canonical(child["payload"]) != _canonical(manifest["candidates"][index])
+                    or _canonical(child["report"]) != _canonical(entry["report"])):
+                raise ValueError(f"Run decision snapshot integrity check failed: {run_id}")
+            decisions.append({"candidate_index": index, **child})
+        return {"run_id": row["id"], "created_at": row["created_at"],
+                "input_sha256": row["input_sha256"], "report_sha256": row["report_sha256"],
+                "manifest": manifest, "result": result,
+                "decision_ids": [child["decision_id"] for child in decisions],
+                "decisions": decisions}
 
     def get(self, decision_id: str) -> dict:
         """Read a record and verify stored snapshot hashes before using it."""
@@ -184,14 +295,24 @@ class Ledger:
         if _digest(row["input_json"]) != row["input_sha256"] or _digest(row["report_json"]) != row["report_sha256"]:
             raise ValueError(f"Decision snapshot integrity check failed: {decision_id}")
         settlement_row = self._connection.execute(
-            "SELECT settlement_json FROM settlements WHERE decision_id = ?", (decision_id,)
+            "SELECT settlement_json, settlement_sha256 FROM settlements WHERE decision_id = ?", (decision_id,)
         ).fetchone()
+        settlement_integrity = "unsettled"
+        if settlement_row is not None:
+            digest = settlement_row["settlement_sha256"]
+            if digest is None:
+                settlement_integrity = "legacy_unverified"
+            elif _digest(settlement_row["settlement_json"]) != digest:
+                raise ValueError(f"Settlement snapshot integrity check failed: {decision_id}")
+            else:
+                settlement_integrity = "verified"
         return {
             "decision_id": row["id"], "created_at": row["created_at"], "as_of": row["as_of"],
             "game_id": row["game_id"], "player_id": row["player_id"], "decision": row["decision"],
             "input_sha256": row["input_sha256"], "report_sha256": row["report_sha256"],
             "payload": json.loads(row["input_json"]), "report": json.loads(row["report_json"]),
             "settlement": json.loads(settlement_row["settlement_json"]) if settlement_row else None,
+            "settlement_integrity": settlement_integrity,
         }
 
     def settle(
@@ -258,10 +379,11 @@ class Ledger:
             ),
         }
         try:
+            settlement_json = _canonical(settlement)
             with self._connection:
                 self._connection.execute(
-                    "INSERT INTO settlements (decision_id, settlement_json) VALUES (?, ?)",
-                    (decision_id, _canonical(settlement)),
+                    "INSERT INTO settlements (decision_id, settlement_json, settlement_sha256) VALUES (?, ?, ?)",
+                    (decision_id, settlement_json, _digest(settlement_json)),
                 )
         except sqlite3.IntegrityError as exc:
             raise ValueError("Decision is already settled; original accounting is immutable") from exc
@@ -294,6 +416,7 @@ class Ledger:
             **totals, "total_decisions": len(records), "rejected_decisions": len(rejected),
             "unsettled_decisions": sum(record["settlement"] is None for record in records),
             "research_settlements": sum(bool(record["settlement"]) and record["settlement"]["stake_units"] == 0 for record in records),
+            "legacy_unverified_settlements": sum(record["settlement_integrity"] == "legacy_unverified" for record in records),
             "rejection_reasons": dict(sorted(reasons.items())),
             "failure_causes": dict(sorted(Counter(
                 record["settlement"].get("failure_cause") or "unclassified"

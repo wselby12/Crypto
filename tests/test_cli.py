@@ -92,3 +92,38 @@ class CLITests(unittest.TestCase):
                                 capture_output=True, text=True, timeout=10)
         self.assertEqual(legacy.returncode, 0)
         self.assertIn("NFL", legacy.stdout)
+
+    def test_sunday_command_persists_the_complete_run_and_rejections(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / "audit.sqlite3"
+            command = self.run_cli("sunday", "examples/synthetic_sunday.json", "--json", "--db", db)
+            self.assertEqual(command.returncode, 0, command.stderr)
+            result = json.loads(command.stdout)
+            self.assertEqual(result["result"]["overview"]["no_bet_count"], 2)
+            self.assertEqual(result["result"]["shortlist"], [])
+            self.assertEqual(len(result["decision_ids"]), 2)
+            stored = self.run_cli("show-run", result["run_id"], "--db", db, "--json")
+            self.assertEqual(stored.returncode, 0, stored.stderr)
+            record = json.loads(stored.stdout)
+            self.assertEqual(record["report_sha256"], result["report_sha256"])
+            self.assertEqual(record["result"], result["result"])
+            self.assertEqual(len(record["manifest"]["candidates"]), 2)
+            self.assertTrue(all(row["decision"] == "NO_BET" for row in record["decisions"]))
+            summary = json.loads(self.run_cli("performance", "--db", db, "--json").stdout)
+            self.assertEqual(summary["rejected_decisions"], 2)
+            self.assertEqual(summary["settled_bets"], 0)
+
+    def test_empty_sunday_shortlist_has_explicit_gate_exit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            command = self.run_cli("sunday", "examples/synthetic_sunday.json", "--require-qualified", "--db", Path(directory) / "audit.sqlite3")
+            self.assertEqual(command.returncode, 3, command.stderr)
+            self.assertIn("0 current selections", command.stdout)
+            self.assertIn("Complete run saved", command.stdout)
+
+    def test_versioned_policy_is_available_from_the_cli(self):
+        command = self.run_cli("policy", "--json")
+        self.assertEqual(command.returncode, 0, command.stderr)
+        policy = json.loads(command.stdout)
+        self.assertEqual(policy["id"], "audit-68-v2")
+        self.assertEqual(policy["calibration"]["minimum_distinct_games"], 30)
+        self.assertEqual(len(policy["sha256"]), 64)

@@ -11,6 +11,7 @@ Python **3.12+** is required. There are no third-party runtime dependencies, API
 ```bash
 python3 -m engine --help
 python3 -m engine demo
+python3 -m engine sunday examples/synthetic_sunday.json
 python3 -m engine rules
 python3 -m unittest discover -s tests -v
 ```
@@ -36,6 +37,20 @@ python3 -m engine performance
 
 Replace example data with sourced inputs for a real run. Sunday is interpreted in `America/New_York`, including daylight saving time. Morning means kickoff before 13:00 Eastern; the early window is 13:00–13:59. The selector uses the next/current Sunday or an explicit `target_date`. It does not assume a morning fixture exists.
 
+## Version 0.2: one complete Sunday run
+
+```bash
+python3 -m engine sunday examples/synthetic_sunday.json --output .engine/sunday.json
+python3 -m engine show-run RUN_ID
+python3 -m engine policy
+```
+
+The Sunday manifest contains one shared cutoff, a schedule, and the player candidates to investigate. Games are ranked first, then each candidate is reconciled against the scheduled teams, kickoff, season, and spread. Every decision is preserved, including mismatches and rejections. An empty shortlist is a complete, valid result.
+
+Current selections additionally require a complete-schedule claim, an unexpired snapshot, all required citations within their freshness windows, and every individual evidence/value gate. Expiry is checked again after all candidates finish running. Historical qualifications remain research records. Defaults allow three single selections, at most one per game and one per player; limits prevent overlapping alternate lines from becoming a stack. No parlay probability is inferred.
+
+The entire manifest, final run, and linked candidate decisions are saved in one SQLite transaction. Failed validation or database writes cannot leave a partial Sunday run. `show-run` checks both run and candidate hashes. Each evaluation also carries a versioned policy fingerprint, operating thresholds, and implementation-file hashes so its methodology remains identifiable. New settlements have integrity digests; older settlements without digests remain readable and are explicitly labeled `legacy_unverified`.
+
 ## Enforced decisions
 
 `QUALIFIED` means the **supplied snapshot** meets the implemented research gates. It is not a guaranteed result or independent source authentication. `NO_BET` lists the exact missing evidence, contradictory information, exclusion, or value requirement. Invalid input exits with code 2. A valid NO_BET evaluation exits 0; use `--require-qualified` to exit 3 instead.
@@ -46,7 +61,11 @@ Evidence timestamps cannot leak past the snapshot cutoff. Recent reporting expir
 
 The model resamples paired historical opportunities and efficiency, applies three explicit game scripts, and recomputes outcomes under reduced workload and efficiency. It counts exact-line wins/losses/pushes, models refunds, and calculates EV at the actual supplied price. Its 95% interval describes Monte Carlo sampling error; model and input uncertainty remain. It is an initial, **unvalidated** empirical model.
 
-Probability qualification requires at least 100 chronological, settled, non-push holdout records for the same model, prop category, and pregame/live phase, expected calibration error at most 0.10, and at least 20 observations near the candidate's estimated probability. These are conservative operational defaults, not empirically proven guarantees. Duplicate events, synthetic calibration, and future outcomes are rejected. Positive EV must survive a conservative sampling-error screen and the sensitivity scenario.
+Probability qualification requires at least 100 chronological, settled, non-push holdout records across at least 30 distinct games for the same model, prop category, and pregame/live phase. Expected calibration error must be at most 0.10, with at least 20 observations across 10 games near the candidate's estimated probability. Each record requires stable game and player identities. Alternate props from a single game cannot manufacture the distinct-game requirement.
+
+The report now includes reliability bins, Brier score and baseline/skill diagnostics, and an equal-game-weighted historical support floor. This provisional one-sided Hoeffding bound assumes independent games and comparable holdout forecasts; it does not remove selection bias or establish total prediction uncertainty. The floor must exceed sportsbook break-even. These are operating defaults, not empirically proven guarantees. Synthetic calibration and future outcomes remain blocked.
+
+Positive value must survive both the aggregate sensitivity check and **each** early-lead, competitive, and early-deficit script. Every script needs at least 30 executed draws and conservative positive EV. A favorable average cannot hide a losing script. Recent-three-game opportunities dropping by more than 25% versus the previous three blocks the stable-workload assumption. Explicit team, quarterback, or play-caller mismatches in historical data also block qualification. Missing optional context is reported as unknown.
 
 The original weighted 0–10 research score is optional and explicitly labeled heuristic. It never becomes a win probability or bypasses a gate. Single selections are supported; the engine does not multiply same-game leg probabilities to construct parlays.
 
@@ -76,6 +95,9 @@ This version accepts structured JSON evidence. It **does not yet fetch or indepe
 | `engine/slate.py` | Sunday game selection and transparent suitability ranking |
 | `engine/probability.py` | Executed simulations, odds/EV, sensitivity, calibration metrics |
 | `engine/evaluation.py` | Final decision gates and complete audit report |
+| `engine/robustness.py` | Individual game-script value, workload trends, offensive-context consistency |
+| `engine/sunday.py` | Complete slate-to-shortlist research workflow |
+| `engine/policy.py` | Versioned decision policy and fingerprint |
 | `engine/backtest.py` | Chronological held-out snapshot execution |
 | `engine/ledger.py` | Decision preservation and result accounting |
 | `engine/cli.py` | CLI workflow |

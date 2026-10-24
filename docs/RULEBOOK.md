@@ -60,6 +60,22 @@ produces a `missing` record. A declared contradiction remains a contradiction
 even when its provenance also needs repair. Computational steps cannot be
 completed by an imported attestation.
 
+## Additional operating gates in version 0.2
+
+The original 68 steps keep their numbering. The evaluator additionally requires
+positive conservative EV within every modeled script, flags a recent workload
+decline above 25%, and rejects explicitly mixed offensive-context history.
+Calibration needs distinct-game support and a conservative equal-game support
+floor above break-even. These are provisional policies, not learned guarantees.
+
+The Sunday workflow ranks games before evaluation, reconciles imported schedule
+facts, and limits current selections to unexpired snapshots. Every required
+citation contributes its own expiry deadline, checked again after the batch.
+Run manifests, results, and linked decisions are stored atomically. New result
+settlements have integrity hashes; unhashed legacy settlements are identified
+without claiming they were verified. Policy values and implementation hashes
+are retained with decisions. See the README for exact operating thresholds.
+
 ## The 68 steps
 
 `Research` means documented source material is needed. `Calculation` means the

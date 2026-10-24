@@ -43,6 +43,8 @@ def calibration():
         predicted = start + timedelta(days=index)
         records.append({
             "prediction_id": f"prediction-{index}",
+            "game_id": f"holdout-game-{index}",
+            "player_id": "holdout-player",
             "predicted_at": predicted.isoformat(),
             "settled_at": (predicted + timedelta(hours=4)).isoformat(),
             "probability": 0.6,
@@ -186,10 +188,130 @@ class CalibrationTests(unittest.TestCase):
             script["opportunity_multiplier"] = 1
         data["calibration"] = calibration()
         report = analyze(data)["calibration"]
-        self.assertTrue(report["qualified"])
+        self.assertFalse(report["qualified"])
         self.assertEqual(report["observations"], 100)
+        self.assertEqual(report["unique_games"], 100)
         self.assertAlmostEqual(report["brier_score"], 0.24)
+        self.assertAlmostEqual(report["brier_baseline"], 0.24)
+        self.assertAlmostEqual(report["brier_skill_score"], 0)
         self.assertAlmostEqual(report["expected_calibration_error"], 0)
+        self.assertAlmostEqual(report["conservative_probability_floor"], .6 - math.sqrt(math.log(20) / 200))
+        self.assertIn("support floor", report["reason"])
+
+    def test_many_distinct_games_and_strong_support_qualify(self):
+        data = payload()
+        uniform_history(data, production=100)
+        data["calibration"] = calibration()
+        for record in data["calibration"]["predictions"]:
+            record.update(probability=1, outcome=1)
+        report = analyze(data)["calibration"]
+        self.assertTrue(report["qualified"], report["reason"])
+        self.assertEqual(report["candidate_bin_unique_games"], 100)
+        self.assertAlmostEqual(report["conservative_probability_floor"], 1 - math.sqrt(math.log(20) / 200))
+        self.assertIsNone(report["brier_skill_score"])
+        self.assertIn("Assumes independent games", report["uncertainty_method"])
+
+    def test_correlated_props_cannot_inflate_game_count(self):
+        data = payload()
+        uniform_history(data, production=100)
+        data["calibration"] = calibration()
+        for index, record in enumerate(data["calibration"]["predictions"]):
+            record.update(game_id="one-game", player_id=f"player-{index}", line=50.5,
+                          side="over", probability=1, outcome=1)
+        report = analyze(data)["calibration"]
+        self.assertFalse(report["qualified"])
+        self.assertEqual(report["observations"], 100)
+        self.assertEqual(report["unique_games"], 1)
+        self.assertIn("distinct settled games", report["reason"])
+
+    def test_candidate_bin_needs_distinct_games_even_if_global_coverage_is_adequate(self):
+        data = payload()
+        uniform_history(data, production=100)
+        data["calibration"] = calibration()
+        for index, record in enumerate(data["calibration"]["predictions"]):
+            record.update(player_id=f"player-{index}", line=50.5, side="over")
+            if index < 20:
+                record.update(game_id="same-high-probability-game", probability=1, outcome=1)
+            else:
+                record.update(probability=0, outcome=0)
+        report = analyze(data)["calibration"]
+        self.assertFalse(report["qualified"])
+        self.assertEqual(report["unique_games"], 81)
+        self.assertEqual(report["candidate_bin_observations"], 20)
+        self.assertEqual(report["candidate_bin_unique_games"], 1)
+        self.assertIn("probability range needs at least 10 distinct", report["reason"])
+
+    def test_global_distinct_game_threshold_boundary(self):
+        for games, qualified in ((29, False), (30, True)):
+            data = payload()
+            uniform_history(data, production=100)
+            data["calibration"] = calibration()
+            for index, record in enumerate(data["calibration"]["predictions"]):
+                record.update(game_id=f"game-{index % games}", player_id=f"player-{index}",
+                              line=50.5, side="over", probability=1, outcome=1)
+            report = analyze(data)["calibration"]
+            with self.subTest(games=games):
+                self.assertEqual(report["qualified"], qualified, report["reason"])
+                self.assertEqual(report["unique_games"], games)
+                self.assertAlmostEqual(report["conservative_probability_floor"],
+                                       1 - math.sqrt(math.log(20) / (2 * games)))
+
+    def test_candidate_bin_game_threshold_boundary(self):
+        for games, qualified in ((9, False), (10, True)):
+            data = payload()
+            uniform_history(data, production=100)
+            data["calibration"] = calibration()
+            for index, record in enumerate(data["calibration"]["predictions"]):
+                record.update(player_id=f"player-{index}", line=50.5, side="over")
+                if index < 20:
+                    record.update(game_id=f"high-bin-{index % games}", probability=1, outcome=1)
+                else:
+                    record.update(probability=0, outcome=0)
+            report = analyze(data)["calibration"]
+            with self.subTest(games=games):
+                self.assertEqual(report["qualified"], qualified, report["reason"])
+                self.assertEqual(report["candidate_bin_unique_games"], games)
+
+    def test_game_weighting_limits_one_games_influence_and_bound_caps_at_forecast(self):
+        data = payload()
+        uniform_history(data, production=100)
+        data["calibration"] = calibration()
+        records = data["calibration"]["predictions"]
+        for index, record in enumerate(records):
+            record.update(player_id=f"player-{index}", line=50.5, side="over", probability=1, outcome=1)
+        # Ninety winning props in one game count once beside ten losing games.
+        for index, record in enumerate(records):
+            if index < 90:
+                record["game_id"] = "concentrated-wins"
+            else:
+                record["outcome"] = 0
+        report = analyze(data)["calibration"]
+        self.assertAlmostEqual(report["candidate_bin_equal_game_win_rate"], 1 / 11)
+        self.assertEqual(report["conservative_probability_floor"], 0)
+
+    def test_game_and_player_identity_are_required(self):
+        for field in ("game_id", "player_id"):
+            data = payload()
+            data["calibration"] = calibration()
+            del data["calibration"]["predictions"][0][field]
+            report = analyze(data)["calibration"]
+            self.assertFalse(report["qualified"])
+            self.assertIn(field, report["reason"])
+
+    def test_reliability_bins_preserve_counts_and_brier_skill_diagnostics(self):
+        data = payload()
+        data["calibration"] = calibration()
+        for index, record in enumerate(data["calibration"]["predictions"]):
+            record["probability"] = .8 if index < 50 else .2
+            record["outcome"] = 1 if index < 50 else 0
+        report = analyze(data)["calibration"]
+        self.assertAlmostEqual(report["brier_score"], .04)
+        self.assertAlmostEqual(report["brier_baseline"], .25)
+        self.assertAlmostEqual(report["brier_skill_score"], .84)
+        self.assertEqual(sum(row["observations"] for row in report["reliability_bins"]), 100)
+        self.assertEqual(report["reliability_bins"][8]["unique_games"], 50)
+        self.assertEqual(report["reliability_bins"][8]["predicted_mean"], .8)
+        self.assertEqual(report["reliability_bins"][8]["observed_mean"], 1)
 
     def test_unseen_probability_range_does_not_inherit_global_calibration(self):
         data = payload()
@@ -318,7 +440,10 @@ class LiveTests(unittest.TestCase):
         self.assertFalse(report["calibration"]["qualified"])
         self.assertIn("mode", report["calibration"]["reason"])
         data["calibration"]["mode"] = "live"
-        self.assertTrue(analyze(data)["calibration"]["qualified"])
+        report = analyze(data)["calibration"]
+        self.assertFalse(report["qualified"])
+        self.assertNotIn("mode", report["reason"])
+        self.assertEqual(report["conservative_probability_floor"], 0)
 
     def test_missing_live_inputs_fail(self):
         for value in [None, {}, {"production": 40, "remaining_opportunities": []}]:

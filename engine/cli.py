@@ -48,6 +48,17 @@ def parser():
     command = commands.add_parser("backtest", help="execute chronological holdout snapshots")
     command.add_argument("input", type=Path)
     _output_options(command)
+    command = commands.add_parser("sunday", help="rank games, evaluate candidates, and save a diversified Sunday research run")
+    command.add_argument("input", type=Path, help="manifest containing schedule and candidates")
+    _db_option(command)
+    _output_options(command)
+    command.add_argument("--require-qualified", action="store_true", help="exit 3 if no current selection qualifies")
+    command = commands.add_parser("show-run", help="verify and retrieve a complete Sunday run")
+    command.add_argument("run_id")
+    _db_option(command)
+    _output_options(command)
+    command = commands.add_parser("policy", help="show versioned operating gates and their fingerprint")
+    _output_options(command)
     command = commands.add_parser("rules", help="show all 68 audit steps")
     _output_options(command)
     command = commands.add_parser("show", help="verify hashes and retrieve an original decision")
@@ -85,14 +96,35 @@ def _print_result(result, args):
         print(f"{label}{report['decision']} | {report['player']} | {report['market']['stat']} over {report['market']['line']}")
         print(f"Research cutoff: {report['as_of']} | target: {report['target_window']}")
         print("Scope: " + report["snapshot_scope"])
+        print("Current snapshot expires: " + report["current_until"])
         print(f"Executed {model['simulation']['draws']:,} draws with seed {model['simulation']['seed']}; model remains unvalidated")
         print(f"Model estimate under supplied assumptions: win {model['probability_win']:.1%}, push {model['probability_push']:.1%}; EV {model['unit_expected_value']:+.3f} units per unit")
         print("Calibration: " + model["calibration"]["reason"])
+        robustness = report["robustness"]
+        print(f"Script/workload checks: {'qualified' if robustness['qualified'] else 'blocked'} | worst script: {robustness['worst_script']}")
         print("Audit: " + ", ".join(f"{count} {name}" for name, count in report["audit_counts"].items()))
         for reason in report["blockers"]:
             print("- " + reason)
         print("Decision saved: " + result["decision_id"])
         print("Supplied citations were not independently fetched.")
+    elif args.command == "sunday":
+        run = result["result"]
+        print(f"Sunday {run['ranked_slate']['target_date']} | morning + 1 p.m. Eastern")
+        if run["synthetic"]:
+            print("SYNTHETIC RESEARCH RUN")
+        counts = run["overview"]
+        print(f"{counts['candidate_count']} candidates | {counts['no_bet_count']} NO BET | {counts['shortlisted_count']} current selections")
+        for row in run["shortlist"]:
+            market = row["market"]
+            print(f"{row['selection_rank']}. {row['player']} | {market['sportsbook']} | {market['stat']} over {market['line']} ({market['american_odds']:+d})")
+        if not run["shortlist"]:
+            print("NO BET: no current selection met every research and slate requirement.")
+        for row in run["decisions"]:
+            report = row["report"]
+            reason = report["blockers"][0] if report.get("blockers") else row.get("selection_reason", "")
+            print(f"- {report['player']}: {report['decision']} | {reason}")
+        print("Games needing candidate research: " + str(len(run["coverage"]["games_without_candidates"])))
+        print("Complete run saved: " + result["run_id"])
     elif args.command == "slate":
         print(f"Sunday {result['target_date']} | America/New_York | morning + 1 p.m. Eastern")
         if result["synthetic"]:
@@ -136,15 +168,29 @@ def main(argv=None):
             return 3 if args.require_qualified and report["decision"] != "QUALIFIED" else 0
         if args.command == "slate":
             result = filter_and_rank(load_json(args.input), as_of=args.as_of)
+        elif args.command == "sunday":
+            from .sunday import run_sunday
+            manifest = load_json(args.input)
+            workflow = run_sunday(manifest)
+            with Ledger(args.db) as ledger:
+                receipt = ledger.record_run(manifest, workflow)
+            result = {**receipt, "result": workflow}
+            _print_result(result, args)
+            return 3 if args.require_qualified and not workflow["shortlist"] else 0
         elif args.command == "backtest":
             from .backtest import run_backtest
             result = run_backtest(load_json(args.input))
         elif args.command == "rules":
             result = {"count": len(RULES), "rules": RULES}
+        elif args.command == "policy":
+            from .policy import snapshot
+            result = snapshot()
         else:
             with Ledger(args.db) as ledger:
                 if args.command == "show":
                     result = ledger.get(args.decision_id)
+                elif args.command == "show-run":
+                    result = ledger.get_run(args.run_id)
                 elif args.command == "performance":
                     result = ledger.performance()
                 else:

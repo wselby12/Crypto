@@ -3,6 +3,7 @@
 import copy
 from datetime import datetime, timedelta, timezone
 import unittest
+from unittest.mock import patch
 
 from engine.evaluation import SCORE_WEIGHTS, evaluate
 from engine.probability import MODEL_ID
@@ -83,6 +84,8 @@ def eligible_fixture():
         "predictions": [
             {
                 "prediction_id": f"fictional-prediction-{index}",
+                "game_id": f"fictional-holdout-game-{index}",
+                "player_id": "fictional-holdout-player",
                 "predicted_at": (first_prediction + timedelta(days=index)).isoformat(),
                 "settled_at": (first_prediction + timedelta(days=index, hours=4)).isoformat(),
                 "probability": 1, "outcome": 1,
@@ -270,6 +273,78 @@ class LiveEvaluationTests(unittest.TestCase):
         report = evaluate(data)
         self.assertEqual(report["decision"], "NO_BET")
         self.assertTrue(any("Rule 53" in reason for reason in report["blockers"]))
+
+
+class StrongerGateTests(unittest.TestCase):
+    def test_profitable_average_cannot_hide_a_losing_deficit_script(self):
+        data = eligible_fixture()
+        data["projection"]["scripts"][0]["weight"] = .1
+        data["projection"]["scripts"][1]["weight"] = .85
+        data["projection"]["scripts"][2].update(weight=.05, opportunity_multiplier=.1)
+        report = evaluate(data)
+        self.assertTrue(report["model"]["recommended_value"])
+        self.assertTrue(report["model"]["calibration"]["qualified"])
+        self.assertEqual(report["decision"], "NO_BET")
+        self.assertFalse(report["robustness"]["qualified"])
+        self.assertEqual(report["robustness"]["worst_script"], "early_deficit")
+
+    def test_high_production_does_not_hide_declining_opportunities(self):
+        data = eligible_fixture()
+        extra = copy.deepcopy(data["history"][-1])
+        extra.update(game_id="additional-game", played_at="2026-09-13T17:00:00Z")
+        data["history"].append(extra)
+        for index, row in enumerate(data["history"]):
+            row["opportunities"] = 20 if index < 3 else 10
+        report = evaluate(data)
+        self.assertEqual(report["model"]["probability_win"], 1)
+        self.assertEqual(report["decision"], "NO_BET")
+        self.assertTrue(report["robustness"]["workload_trend"]["decline_flag"])
+
+    def test_historical_offensive_regime_mismatch_blocks_a_strong_model(self):
+        data = eligible_fixture()
+        data["player"]["context"] = {"quarterback_id": "current-qb"}
+        data["history"][0]["quarterback_id"] = "previous-qb"
+        report = evaluate(data)
+        self.assertEqual(report["decision"], "NO_BET")
+        self.assertTrue(any("quarterback_id" in reason for reason in report["blockers"]))
+
+    def test_many_props_from_five_games_cannot_qualify_the_model(self):
+        data = eligible_fixture()
+        for index, row in enumerate(data["calibration"]["predictions"]):
+            row["game_id"] = f"correlated-game-{index % 5}"
+        report = evaluate(data)
+        self.assertEqual(report["decision"], "NO_BET")
+        self.assertFalse(report["model"]["calibration"]["qualified"])
+        self.assertEqual(report["model"]["calibration"]["unique_games"], 5)
+
+    def test_quote_age_uses_actual_observation_not_just_the_snapshot_cutoff(self):
+        data = eligible_fixture()
+        data["market"]["observed_at"] = "2026-10-17T11:50:00Z"
+        with patch("engine.evaluation.datetime") as clock:
+            clock.now.return_value = datetime(2026, 10, 17, 12, 10, tzinfo=timezone.utc)
+            report = evaluate(data)
+        self.assertEqual(report["decision"], "QUALIFIED")  # Valid historical research only.
+        self.assertFalse(report["current_snapshot"])
+        self.assertEqual(report["current_until"], "2026-10-17T12:05:00+00:00")
+
+    def test_policy_fingerprint_is_saved_with_decision(self):
+        report = evaluate(eligible_fixture())
+        self.assertEqual(report["policy"]["id"], "audit-68-v2")
+        self.assertEqual(len(report["policy"]["sha256"]), 64)
+        self.assertFalse(report["policy"]["digitally_signed"])
+
+    def test_required_citation_expiry_limits_actual_currentness(self):
+        data = eligible_fixture()
+        for row in data["evidence"]:
+            if row["rule_id"] in {43, 44, 46}:
+                row["sources"][0].update(published_at="2026-10-17T11:45:30Z",
+                                         retrieved_at="2026-10-17T11:45:30Z")
+        with patch("engine.evaluation.datetime") as clock:
+            clock.now.return_value = datetime(2026, 10, 17, 12, 2, tzinfo=timezone.utc)
+            report = evaluate(data)
+        self.assertEqual(report["decision"], "QUALIFIED")
+        self.assertFalse(report["current_snapshot"])
+        self.assertEqual(report["current_until"], "2026-10-17T12:00:30+00:00")
 
 
 if __name__ == "__main__":

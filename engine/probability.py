@@ -18,6 +18,8 @@ MODEL_ID = "empirical-bootstrap-v1"
 MIN_CALIBRATION_OBSERVATIONS = 100
 MAX_CALIBRATION_ERROR = 0.10
 MIN_CANDIDATE_BIN_OBSERVATIONS = 20
+MIN_CALIBRATION_GAMES = 30
+MIN_CANDIDATE_BIN_GAMES = 10
 SCRIPT_NAMES = {"early_lead", "competitive", "early_deficit"}
 DISCRETE_STATS = {
     "passing_yards", "rushing_yards", "receiving_yards", "rushing_receiving_yards",
@@ -125,6 +127,22 @@ def _calibration(payload: dict, market_stat: str, as_of: datetime,
         "candidate_probability": candidate_probability,
         "candidate_probability_bin": None,
         "candidate_bin_observations": None,
+        "unique_games": 0,
+        "minimum_unique_games": MIN_CALIBRATION_GAMES,
+        "candidate_bin_unique_games": None,
+        "minimum_candidate_bin_unique_games": MIN_CANDIDATE_BIN_GAMES,
+        "candidate_bin_equal_game_win_rate": None,
+        "conservative_probability_floor": None,
+        "brier_baseline": None,
+        "brier_baseline_scope": "Retrospective constant outcome-rate comparator, not an independently fitted out-of-sample forecast",
+        "brier_skill_score": None,
+        "reliability_bins": [],
+        "uncertainty_method": (
+            "Provisional one-sided 95% Hoeffding support floor using equal-game-weighted "
+            "non-push outcomes within the candidate probability bin. Assumes independent "
+            "games, comparable held-out forecasts, and no retrospective selection. "
+            "It is not an independently calibrated guarantee or total prediction interval."
+        ),
         "mode": payload.get("mode", "pregame"),
         "verification": "Computed from supplied retrospective records; source contents are not independently verified.",
     }
@@ -148,7 +166,7 @@ def _calibration(payload: dict, market_stat: str, as_of: datetime,
         records = calibration.get("predictions")
         if not isinstance(records, list):
             raise ValueError("calibration.predictions must be a list")
-        pairs: list[tuple[float, int]] = []
+        pairs: list[tuple[float, int, str]] = []
         seen: set[tuple] = set()
         prediction_ids: set[str] = set()
         for index, record in enumerate(records):
@@ -177,6 +195,9 @@ def _calibration(payload: dict, market_stat: str, as_of: datetime,
             if not isinstance(identity, str) or not identity or identity in prediction_ids:
                 raise ValueError("calibration prediction IDs must be nonempty, unique strings")
             prediction_ids.add(identity)
+            for field in ("game_id", "player_id"):
+                if not isinstance(record.get(field), str) or not record[field].strip():
+                    raise ValueError(f"{prefix}.{field} must be a stable, nonempty string")
             semantic_fields = ("game_id", "player_id", "line", "side")
             if all(field in record for field in semantic_fields):
                 if not all(isinstance(record[field], str) and record[field] for field in ("game_id", "player_id")):
@@ -195,34 +216,65 @@ def _calibration(payload: dict, market_stat: str, as_of: datetime,
             if outcome is None:
                 result["pushes_excluded"] += 1
             else:
-                pairs.append((probability, int(outcome)))
+                pairs.append((probability, int(outcome), record["game_id"]))
         result["observations"] = len(pairs)
+        result["unique_games"] = len({game_id for _, _, game_id in pairs})
         if not pairs:
             result["reason"] = "No settled non-push calibration observations were supplied."
             return result
-        result["brier_score"] = fmean((probability - outcome) ** 2 for probability, outcome in pairs)
-        bins: list[list[tuple[float, int]]] = [[] for _ in range(10)]
-        for probability, outcome in pairs:
-            bins[min(9, int(probability * 10))].append((probability, outcome))
+        result["brier_score"] = fmean((probability - outcome) ** 2 for probability, outcome, _ in pairs)
+        base_rate = fmean(outcome for _, outcome, _ in pairs)
+        result["brier_baseline"] = fmean((base_rate - outcome) ** 2 for _, outcome, _ in pairs)
+        if result["brier_baseline"] > 0:
+            result["brier_skill_score"] = 1 - result["brier_score"] / result["brier_baseline"]
+        bins: list[list[tuple[float, int, str]]] = [[] for _ in range(10)]
+        for probability, outcome, game_id in pairs:
+            bins[min(9, int(probability * 10))].append((probability, outcome, game_id))
         error = sum(
             len(bucket) / len(pairs)
-            * abs(fmean(p for p, _ in bucket) - fmean(outcome for _, outcome in bucket))
+            * abs(fmean(p for p, _, _ in bucket) - fmean(outcome for _, outcome, _ in bucket))
             for bucket in bins if bucket
         )
         result["expected_calibration_error"] = error
+        for index, bucket in enumerate(bins):
+            by_game: dict[str, list[int]] = {}
+            for _, outcome, game_id in bucket:
+                by_game.setdefault(game_id, []).append(outcome)
+            result["reliability_bins"].append({
+                "low": index / 10, "high": (index + 1) / 10,
+                "observations": len(bucket), "unique_games": len(by_game),
+                "predicted_mean": fmean(p for p, _, _ in bucket) if bucket else None,
+                "observed_mean": fmean(outcome for _, outcome, _ in bucket) if bucket else None,
+                "equal_game_weighted_win_rate": fmean(fmean(outcomes) for outcomes in by_game.values()) if by_game else None,
+            })
         if candidate_probability is not None:
             candidate_bin = min(9, int(candidate_probability * 10))
             result["candidate_probability_bin"] = {"low": candidate_bin / 10, "high": (candidate_bin + 1) / 10}
             result["candidate_bin_observations"] = len(bins[candidate_bin])
+            reliability = result["reliability_bins"][candidate_bin]
+            result["candidate_bin_unique_games"] = reliability["unique_games"]
+            result["candidate_bin_equal_game_win_rate"] = reliability["equal_game_weighted_win_rate"]
+            if reliability["unique_games"]:
+                radius = math.sqrt(math.log(20) / (2 * reliability["unique_games"]))
+                result["conservative_probability_floor"] = max(0.0, min(
+                    candidate_probability, reliability["equal_game_weighted_win_rate"] - radius))
         if len(pairs) < MIN_CALIBRATION_OBSERVATIONS:
             result["reason"] = f"At least {MIN_CALIBRATION_OBSERVATIONS} settled non-push holdout observations are required."
+        elif result["unique_games"] < MIN_CALIBRATION_GAMES:
+            result["reason"] = f"At least {MIN_CALIBRATION_GAMES} distinct settled games are required; correlated props do not create independent games."
         elif error > MAX_CALIBRATION_ERROR:
             result["reason"] = "Supplied holdout records exceed the calibration-error threshold."
         elif candidate_probability is not None and result["candidate_bin_observations"] < MIN_CANDIDATE_BIN_OBSERVATIONS:
             result["reason"] = f"The candidate probability range needs at least {MIN_CANDIDATE_BIN_OBSERVATIONS} settled holdout observations."
+        elif candidate_probability is not None and result["candidate_bin_unique_games"] < MIN_CANDIDATE_BIN_GAMES:
+            result["reason"] = f"The candidate probability range needs at least {MIN_CANDIDATE_BIN_GAMES} distinct settled games."
+        elif candidate_probability is None:
+            result["reason"] = "An all-push forecast has no conditional win probability supporting an edge."
+        elif result["conservative_probability_floor"] <= implied_probability(payload["market"]["american_odds"]):
+            result["reason"] = "The game-weighted holdout support floor does not exceed the current sportsbook break-even probability."
         else:
             result["qualified"] = True
-            result["reason"] = "Supplied chronological holdout records meet the configured sample and calibration-error gates."
+            result["reason"] = "Supplied chronological holdout records meet sample, distinct-game, calibration-error, and conservative support-floor gates."
         return result
     except (ValueError, TypeError, KeyError, OverflowError) as exc:
         result["reason"] = str(exc)

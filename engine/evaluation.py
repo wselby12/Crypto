@@ -1,12 +1,14 @@
 """Execute modeling and enforce evidence, exclusion, and value gates."""
 
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import statistics
 
 from . import __version__
 from .probability import analyze
-from .rules import evaluate_evidence, exclusions
+from .policy import snapshot as policy_snapshot
+from .robustness import assess
+from .rules import HISTORICAL_RULES, MARKET_RULES, evaluate_evidence, exclusions
 from .slate import EASTERN
 from .validation import number, object_value, timestamp, validate
 
@@ -35,7 +37,9 @@ def evaluate(payload):
     validate(payload)
     audit = evaluate_evidence(payload)
     model = analyze(payload)
+    robustness = assess(payload, model)
     blockers = exclusions(payload)
+    blockers.extend(robustness["blockers"])
     mode = payload.get("mode", "pregame")
     cutoff = timestamp(payload["as_of"], "as_of")
     if cutoff > datetime.now(timezone.utc):
@@ -97,28 +101,48 @@ def evaluate(payload):
     for row in audit:
         if row["id"] in computed and row["status"] != "contradicted":
             row.update(status="computed", reason=computed[row["id"]])
-            if row["id"] == 50 and (not model["calibration"]["qualified"] or not model["recommended_value"]):
+            if row["id"] == 50 and (not model["calibration"]["qualified"] or not model["recommended_value"] or not robustness["qualified"]):
                 row.update(status="contradicted", reason="No reliable, calibrated, stress-resistant probability edge established")
         if row["status"] in {"missing", "contradicted"}:
             blockers.append(f"Rule {row['id']}: {row['reason']}")
     blockers = list(dict.fromkeys(blockers))
     executed_at = datetime.now(timezone.utc)
-    age_seconds = (executed_at - cutoff).total_seconds()
     quote_max_age = 60 if mode == "live" else 900
-    is_current = (0 <= age_seconds <= quote_max_age
-                  and (mode == "live" or timestamp(payload["game"]["kickoff"], "kickoff") > executed_at))
+    deadlines = [cutoff + timedelta(seconds=quote_max_age),
+                 observed + timedelta(seconds=quote_max_age)]
+    # Preserve the earliest expiry of all evidence required by this decision.
+    # A fresh quote cannot extend the life of an older injury or market source.
+    documented_ids = {row["id"] for row in audit if row["status"] == "documented"}
+    for record in payload.get("evidence", []):
+        rule_id = record["rule_id"]
+        if rule_id not in documented_ids:
+            continue
+        ttl = 60 if 51 <= rule_id <= 59 else 900 if rule_id in MARKET_RULES else 172800
+        for source in record["sources"]:
+            deadlines.append(timestamp(source["retrieved_at"], "retrieved_at") + timedelta(seconds=ttl))
+            if rule_id not in HISTORICAL_RULES:
+                deadlines.append(timestamp(source["published_at"], "published_at") + timedelta(seconds=ttl))
+    if mode == "live":
+        deadlines.append(timestamp(payload["live"]["observed_at"], "live.observed_at") + timedelta(seconds=60))
+    else:
+        deadlines.append(timestamp(payload["game"]["kickoff"], "kickoff"))
+    current_until = min(deadlines)
+    is_current = cutoff <= executed_at < current_until
     return {
         "engine_version": __version__, "decision": "NO_BET" if blockers else "QUALIFIED",
         "mode": mode, "as_of": payload["as_of"],
         "executed_at": executed_at.isoformat(),
         "snapshot_scope": "current_snapshot" if is_current else "historical_or_noncurrent_snapshot",
         "current_snapshot": is_current,
+        "current_until": current_until.isoformat(),
         "synthetic": payload.get("synthetic", False),
         "game_id": payload["game"]["id"], "player": payload["player"]["name"],
         "market": dict(payload["market"]), "target_window": window,
         "blockers": blockers, "audit": audit,
         "audit_counts": dict(Counter(row["status"] for row in audit)),
         "historical_windows": summaries, "model": model,
+        "robustness": robustness, "policy": policy_snapshot(),
+        "warnings": robustness["warnings"],
         "heuristic_score": _heuristic_score(payload),
         "source_verification": "Supplied citations checked for provenance and freshness; source contents not independently fetched",
         "limitations": [

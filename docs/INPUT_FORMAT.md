@@ -48,6 +48,18 @@ The current model ID is `empirical-bootstrap-v1`. Specify 1,000–200,000 simula
 
 The backtest output's `calibration` object can be used as a candidate's `calibration` field. It contains stable prediction identities, the held-out forecast probability conditional on a non-push outcome, official binary outcome (`null` for push), provenance, and timestamps. Supply actual held-out records, not scenarios designed to meet the numerical gate. All-push forecasts have no conditional win estimate and are excluded rather than assigned an invented probability. Synthetic cases propagate a synthetic calibration flag.
 
+Each calibration prediction also needs nonempty `game_id` and `player_id`. At least 30 distinct games are required overall and 10 within the candidate probability bin. Duplicates cannot be relabeled with another source URL or prediction ID to inflate support. Reliability reports weight games equally when deriving the candidate's conservative support floor. This bound assumes independence between games; it does not authenticate results or prove universal calibration.
+
+Optional `player.context` may contain `quarterback_id` and `playcaller_id`. Historical rows may include those same keys and `team`. When supplied, these identities must match the current offensive context. Contradictory history is rejected rather than silently removed. With six or more games, recent-three vs previous-three opportunity decline greater than 25% blocks qualification. These are explicit operating policies.
+
+## Complete Sunday manifest
+
+See `examples/synthetic_sunday.json`. A manifest contains `as_of`, `schedule`, `candidates` (an array of normal pregame snapshots), optional `synthetic`, `max_selections` (default 3, range 1–10), and `max_per_game` (default 1, range 1–3). The per-player limit is always one. Candidate cutoffs and game metadata must agree with the schedule. Duplicate game/player/stat/line/sportsbook imports are invalid.
+
+`sunday` returns a receipt with `run_id`, `decision_ids`, input/report SHA-256 hashes, and `result`. The result includes the ranked slate, every decision report, a current shortlist, explicit deferral reasons, and candidate coverage for eligible games. `current_until` limits active use; expiry is the earliest relevant quote, citation, live observation, or kickoff deadline. The batch checks expiry again at selection time. Imported completeness and source contents are not independently authenticated.
+
+`show-run RUN_ID` retrieves and verifies the original manifest, result, and linked decisions. Those rows are written atomically, including all rejected candidates. `--require-qualified` exits 3 if no current selection qualifies, while still preserving the full research run. The `policy` command exposes the versioned operating thresholds recorded with each evaluation.
+
 ## Live mode
 
 In addition to the pregame baseline and live rules 51–59, supply `live.observed_at`, `quarter` (1–5), `clock_seconds` (0–900 remaining in the current quarter), `score` with home/away values, `possession` identifying a team, `player_active`, integer current `production`, and an array of nonnegative integer `remaining_opportunities` scenario samples. A game must have kicked off. Live snapshots and quotes expire after 60 seconds. Live calibration must be from live forecasts.

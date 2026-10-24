@@ -1,0 +1,43 @@
+{
+  "season": 2026,
+  "synthetic": true,
+  "complete": false,
+  "target_date": "2026-10-25",
+  "source": {
+    "url": "https://example.com/synthetic-schedule",
+    "published_at": "2026-10-24T11:55:00Z",
+    "retrieved_at": "2026-10-24T11:55:00Z"
+  },
+  "games": [
+    {
+      "id": "DEMO-MORNING",
+      "kickoff": "2026-10-25T13:30:00Z",
+      "home_team": "DEMO-M1",
+      "away_team": "DEMO-M2",
+      "spread": -2.5,
+      "total": 45.5,
+      "pace": 65,
+      "data_quality": 0.8
+    },
+    {
+      "id": "DEMO-SUNDAY-EARLY",
+      "kickoff": "2026-10-25T17:00:00Z",
+      "home_team": "DEMO-HOME",
+      "away_team": "DEMO-AWAY",
+      "spread": -3.5,
+      "total": 47.5,
+      "pace": 66,
+      "data_quality": 0.8
+    },
+    {
+      "id": "DEMO-LATE",
+      "kickoff": "2026-10-25T20:25:00Z",
+      "home_team": "DEMO-L1",
+      "away_team": "DEMO-L2",
+      "spread": -3,
+      "total": 46,
+      "pace": 65,
+      "data_quality": 0.8
+    }
+  ]
+}

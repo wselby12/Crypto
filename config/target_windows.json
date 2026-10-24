@@ -1,0 +1,12 @@
+{
+  "sport": "NFL",
+  "weekday": "Sunday",
+  "timezone": "America/New_York",
+  "windows": {
+    "morning": {"start": "00:00", "end": "13:00"},
+    "early": {"start": "13:00", "end": "14:00"}
+  },
+  "end_is_exclusive": true,
+  "selection": "Upcoming Sunday morning and 1 p.m. Eastern games only",
+  "schedule_required": "Supply a current cited schedule; a morning game is not assumed to exist"
+}

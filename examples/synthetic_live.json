@@ -1,0 +1,200 @@
+{
+  "schema_version": 1,
+  "synthetic": true,
+  "mode": "live",
+  "notes": "Fictional demonstration only. No real team, player, schedule, odds, or result is asserted.",
+  "as_of": "2026-10-18T18:00:00Z",
+  "game": {
+    "id": "DEMO-LIVE",
+    "season": 2026,
+    "kickoff": "2026-10-18T17:00:00Z",
+    "home_team": "DEMO-HOME",
+    "away_team": "DEMO-AWAY",
+    "spread": -3.5
+  },
+  "player": {
+    "id": "demo-rb",
+    "name": "Synthetic Running Back",
+    "team": "DEMO-HOME",
+    "position": "RB",
+    "stable_games": 10,
+    "risk": {
+      "injury_designation_last_14_days": false,
+      "missed_game_last_4_weeks": false,
+      "final_status_confirmed": false,
+      "qb_changed_last_2_weeks": false,
+      "playcaller_changed_last_2_weeks": false,
+      "usage_restriction_unresolved": false
+    }
+  },
+  "market": {
+    "sportsbook": "DEMO-BOOK",
+    "stat": "rushing_yards",
+    "side": "over",
+    "line": 49.5,
+    "american_odds": -110,
+    "observed_at": "2026-10-18T17:59:30Z",
+    "opening_line": 51.5
+  },
+  "history": [
+    {
+      "game_id": "demo-history-1",
+      "season": 2026,
+      "played_at": "2026-08-10T17:00:00+00:00",
+      "opportunities": 15,
+      "production": 42,
+      "home": true,
+      "opponent": "DEMO-OPP-1",
+      "snap_share": 0.74,
+      "route_rate": 0.78
+    },
+    {
+      "game_id": "demo-history-2",
+      "season": 2026,
+      "played_at": "2026-08-17T17:00:00+00:00",
+      "opportunities": 16,
+      "production": 58,
+      "home": false,
+      "opponent": "DEMO-OPP-2",
+      "snap_share": 0.75,
+      "route_rate": 0.78
+    },
+    {
+      "game_id": "demo-history-3",
+      "season": 2026,
+      "played_at": "2026-08-24T17:00:00+00:00",
+      "opportunities": 17,
+      "production": 76,
+      "home": true,
+      "opponent": "DEMO-OPP-3",
+      "snap_share": 0.76,
+      "route_rate": 0.78
+    },
+    {
+      "game_id": "demo-history-4",
+      "season": 2026,
+      "played_at": "2026-08-31T17:00:00+00:00",
+      "opportunities": 18,
+      "production": 55,
+      "home": false,
+      "opponent": "DEMO-OPP-4",
+      "snap_share": 0.74,
+      "route_rate": 0.78
+    },
+    {
+      "game_id": "demo-history-5",
+      "season": 2026,
+      "played_at": "2026-09-07T17:00:00+00:00",
+      "opportunities": 19,
+      "production": 88,
+      "home": true,
+      "opponent": "DEMO-OPP-5",
+      "snap_share": 0.75,
+      "route_rate": 0.78
+    },
+    {
+      "game_id": "demo-history-6",
+      "season": 2026,
+      "played_at": "2026-09-14T17:00:00+00:00",
+      "opportunities": 20,
+      "production": 62,
+      "home": false,
+      "opponent": "DEMO-OPP-6",
+      "snap_share": 0.76,
+      "route_rate": 0.78
+    },
+    {
+      "game_id": "demo-history-7",
+      "season": 2026,
+      "played_at": "2026-09-21T17:00:00+00:00",
+      "opportunities": 15,
+      "production": 39,
+      "home": true,
+      "opponent": "DEMO-OPP-7",
+      "snap_share": 0.74,
+      "route_rate": 0.78
+    },
+    {
+      "game_id": "demo-history-8",
+      "season": 2026,
+      "played_at": "2026-09-28T17:00:00+00:00",
+      "opportunities": 16,
+      "production": 81,
+      "home": false,
+      "opponent": "DEMO-OPP-8",
+      "snap_share": 0.75,
+      "route_rate": 0.78
+    },
+    {
+      "game_id": "demo-history-9",
+      "season": 2026,
+      "played_at": "2026-10-05T17:00:00+00:00",
+      "opportunities": 17,
+      "production": 64,
+      "home": true,
+      "opponent": "DEMO-OPP-9",
+      "snap_share": 0.76,
+      "route_rate": 0.78
+    },
+    {
+      "game_id": "demo-history-10",
+      "season": 2026,
+      "played_at": "2026-10-12T17:00:00+00:00",
+      "opportunities": 18,
+      "production": 72,
+      "home": false,
+      "opponent": "DEMO-OPP-10",
+      "snap_share": 0.74,
+      "route_rate": 0.78
+    }
+  ],
+  "projection": {
+    "model_id": "empirical-bootstrap-v1",
+    "simulations": 10000,
+    "seed": 68,
+    "scripts": [
+      {
+        "name": "early_lead",
+        "weight": 0.25,
+        "opportunity_multiplier": 1.1,
+        "efficiency_multiplier": 1.0
+      },
+      {
+        "name": "competitive",
+        "weight": 0.5,
+        "opportunity_multiplier": 1.0,
+        "efficiency_multiplier": 1.0
+      },
+      {
+        "name": "early_deficit",
+        "weight": 0.25,
+        "opportunity_multiplier": 0.8,
+        "efficiency_multiplier": 0.95
+      }
+    ],
+    "sensitivity": {
+      "opportunity_multiplier": 0.8,
+      "efficiency_multiplier": 0.9
+    }
+  },
+  "evidence": [],
+  "live": {
+    "observed_at": "2026-10-18T17:59:30Z",
+    "quarter": 3,
+    "clock_seconds": 600,
+    "score": {
+      "home": 14,
+      "away": 10
+    },
+    "possession": "DEMO-HOME",
+    "player_active": true,
+    "production": 20,
+    "remaining_opportunities": [
+      6,
+      7,
+      8,
+      9,
+      10
+    ]
+  }
+}
